@@ -1,14 +1,12 @@
 import os
 import streamlit as st
 import pandas as pd
-from langchain.embeddings import OpenAIEmbeddings
-from langchain.vectorstores import FAISS
-from langchain.llms import OpenAI
+from langchain_openai import OpenAIEmbeddings
+from langchain_community.vectorstores import FAISS
+from langchain_openai import ChatOpenAI
 from langchain.chains import RetrievalQA
 import hashlib
-import pickle
-from langchain.chains.question_answering import load_qa_chain
-from langchain import PromptTemplate
+from langchain.prompts import PromptTemplate
 
 # OpenAI APIキーの設定
 openai_api_key = os.getenv("OPENAI_API_KEY")
@@ -27,45 +25,39 @@ def create_embeddings_and_index(data):
     faiss_index = FAISS.from_texts(data['text'].tolist(), embeddings)
     return faiss_index
 
-# キャッシュされたハッシュとインデックスをロード
-model_dir = '/app/model'
-os.makedirs(model_dir, exist_ok=True)
-
-index_path = os.path.join(model_dir, 'index.pkl')
-hash_path = os.path.join(model_dir, 'hash.txt')
-
-if os.path.exists(index_path) and os.path.exists(hash_path):
-    with open(index_path, 'rb') as f:
-        faiss_index = pickle.load(f)
-    with open(hash_path, 'r') as f:
-        cached_hash = f.read().strip()
-else:
-    faiss_index = None
-    cached_hash = None
-
+# データの読み込みとインデックスの作成
 data = load_data()
-current_hash = compute_hash(data)
-
-# データが変更された場合のみエンベディングとインデックスを作成
-if current_hash != cached_hash:
-    faiss_index = create_embeddings_and_index(data)
-    with open(index_path, 'wb') as f:
-        pickle.dump(faiss_index, f)
-    with open(hash_path, 'w') as f:
-        f.write(current_hash)
+faiss_index = create_embeddings_and_index(data)
 
 # RetrievalQAのセットアップ
-llm = OpenAI(api_key=openai_api_key, model_name="gpt-4o")
-qa_chain = load_qa_chain(llm, chain_type="stuff")  # "stuff", "map_reduce", etc.
+llm = ChatOpenAI(api_key=openai_api_key, model_name="gpt-4o")
 retriever = faiss_index.as_retriever()
 
-qa = RetrievalQA(combine_documents_chain=qa_chain, retriever=retriever)
+# プロンプトテンプレートの作成
+prompt_template = """Use the following pieces of context to answer the question at the end. If you don't know the answer, just say that you don't know, don't try to make up an answer.
 
-st.title('RAG App using LangChain, FAISS, and OpenAI API')
-st.write('Enter a query to retrieve and generate answers from the data.')
+{context}
+
+Question: {question}
+Answer:"""
+PROMPT = PromptTemplate(
+    template=prompt_template, input_variables=["context", "question"]
+)
+
+# RetrievalQA チェーンの構築
+qa = RetrievalQA.from_chain_type(
+    llm=llm,
+    chain_type="stuff",
+    retriever=retriever,
+    return_source_documents=True,
+    chain_type_kwargs={"prompt": PROMPT}
+)
+
+st.title('シンプルRAG App with LangChain, FAISS, and OpenAI API')
+st.write('クエリを入力してください')
 
 query = st.text_input('Query:', '')
 
 if query:
-    answer = qa.run(query)
-    st.write('Answer:', answer)
+    result = qa({"query": query})
+    st.write('Answer:', result['result'])
